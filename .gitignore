@@ -1,5 +1,8 @@
 # Byte-compiled / optimized / DLL files
+data/
+models/
 __pycache__/
+.ipynb_checkpoints/
 *.py[codz]
 *$py.class
 
