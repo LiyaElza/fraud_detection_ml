@@ -5,6 +5,7 @@ __pycache__/
 .ipynb_checkpoints/
 *.py[codz]
 *$py.class
+.DS_Store
 
 # C extensions
 *.so
