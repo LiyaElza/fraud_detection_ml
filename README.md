@@ -1,91 +1,69 @@
-# Cost Sensitive Fraud Detection System
+# Cost-Sensitive Fraud Detection
 
-A machine learning system that detects credit card fraud by minimizing financial loss. The project is built with XGBoost, threshold optimization and SHAP explainability. An interactive app is built using Streamlit to use the trained model to detect fraud cases.
+Credit card fraud detection that evaluates models by **business cost** as well as PR-AUC, with the decision threshold chosen on a validation split. Built with XGBoost, scikit-learn baselines, SHAP explanations and a Streamlit app, with unit tests and CI.
 
-## Problem Statement
+## Problem
 
-Here we are using the public dataset that consists of credit card transactions in September 2013 by European cardholders. The key problem lies in the representation of fraud cases in the dataset. Out of 284807 transactions in the dataset, only 492 are fraud cases. That is, just 0.17%.
+The public dataset ([Kaggle: Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)) has 284,807 European card transactions from September 2013, of which 492 (0.17%) are fraud. A model that predicts "legitimate" every time scores 99.83% accuracy and catches nothing, so models are compared on recall, precision, PR-AUC and an explicit cost.
 
-Here, a model which falsely predicts all the transactions as "legitimate" can still acheive 99.83% accuracy without catching any fraud cases. Hence, we are using a business cost function as metrics of the machine learning system rather than accuracy.
+## Method
 
-## Key Conecpts
+- **Split:** stratified 60/20/20 train / validation / test (170,883 / 56,962 / 56,962 transactions). The `Amount` scaler is fitted on the training split only.
+- **Models:** logistic regression and random forest (`class_weight="balanced"`), and XGBoost (`scale_pos_weight`, early stopping on validation PR-AUC).
+- **Cost model (assumed, not measured):** a missed fraud costs $100 and a false alarm costs $10. Edit `COST_FN` and `COST_FP` in `src/costs.py` to test other assumptions.
+- **Threshold:** swept over 0.01-0.99 on the **validation** split; the test split is scored once.
+- **Uncertainty:** a bootstrap 95% confidence interval on the cost saving from threshold tuning. The test split holds only about 100 fraud cases, so small differences in cost between models can be noise.
+- **Explainability:** SHAP values for the top fraud drivers and per-transaction explanations. Features V1-V28 are anonymised PCA components, so they cannot be mapped to business meaning.
 
-### Cost-Sensitive Learning
+## Results (test split, scored once)
 
-The model is evaluated based on financial loss, not accuracy. Here, missing a fraud costs more than a false alarm.
+| Model | PR-AUC | Threshold | Cost @0.5 | Cost @tuned | Recall @tuned | Precision @tuned | Saving (95% CI) |
+|---|---|---|---|---|---|---|---|
+| logistic_regression | 0.719 | 0.990 | $15,100 | $2,080 | 0.857 | 0.553 | $13,020 ([12,220, 13,870]) |
+| random_forest | 0.853 | 0.070 | $2,630 | $1,490 | 0.888 | 0.690 | $1,140 ([450, 1,960]) |
+| xgboost | 0.882 | 0.410 | $1,700 | $1,710 | 0.837 | 0.882 | -$10 ([-30, 0]) |
 
-#### Cost Model 
+Costs assume $100 per missed fraud and $10 per false alarm.
 
-False Positives - Legitimate transaction blocked - Cost $10
-False Negatives - Fraud transaction missed causing loss for the financial institution - $100
+**What the results show**
 
-Total Cost = (False Negatives * $100) + (False Positives * $10)
+- **XGBoost ranks fraud best.** It has the highest PR-AUC (0.882) and the highest precision (0.882), so it raises the fewest false alarms.
+- **Threshold tuning matters for the weaker-calibrated models, not for XGBoost.** It cut logistic regression's cost from $15,100 to $2,080, because `class_weight="balanced"` inflates its probabilities. For XGBoost the default 0.5 was already close to optimal, and the tuned threshold changed cost by -$10 (95% CI -$30 to $0), so tuning did not help there.
+- **Random forest has the lowest cost under these assumed costs** ($1,490), with higher recall (0.888) at lower precision (0.690). The $220 gap to XGBoost was not tested for significance, so with about 100 fraud cases in the test split it could be noise.
+- **The best model may depend on the cost ratio.** XGBoost is more precise and random forest has higher recall, so a higher cost per false alarm would probably favour XGBoost and a higher cost per missed fraud random forest. This has not been tested; changing `COST_FN` and `COST_FP` and re-running `evaluate.py` would show it.
+- **Top SHAP features for XGBoost:** V14, V4, V12, V11, V10 (mean absolute SHAP; the features are anonymised PCA components).
 
+An earlier version of this repo chose the threshold on the test set, so its numbers are not comparable with these.
 
-### Threshold Optimization
+## Run it
 
-Instead of using, the default 0.5 cutoff for legitimate/fraud trade-off, we sweep all thresholds and pick the one which minimizes the business cost
-
-### Shap Explainability
-
-Every prediction made by the model comes with an explaination about what features in what level influenced the final decision.
-
-### Handle Class imbalance
-
-For baseline Logistic Regression and Random Forest models, SMOTE technique and for XGBoost, it built-in scale_pos_weight method are used to handle class imbalance.
-
-
-
-## Key Results
-
-### Threshold 0.5 (default)
-
-False Negatives - 15
-False Positives - 13
-Total Cost - $1630
-
-### Threshold 0.246 (optimized)
-
-False Negatives - 14
-False Positives - 21
-Total Cost - $1610
-
-### Top fraud-driving features (SHAP analysis results):
-
-V14, V4, V12, V10, V17 (in descending order)
-
-
-## How to Run
-
-### Download Data
-
-Download the file creditcard.csv from [Kaggle](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) and store it in the folder data/
-
-### Install depependencies
-
+```bash
 pip install -r requirements.txt
+# download creditcard.csv from Kaggle into data/
+python src/train.py --data data/creditcard.csv
+python src/evaluate.py --data data/creditcard.csv
+python src/explain.py --data data/creditcard.csv
+streamlit run app/streamlit_app.py   # local app
+pytest -q
+```
 
-### Train the models
+## Layout
 
-python src/train.py
+```
+src/preprocessing.py  split + leakage-free scaling
+src/costs.py          cost function and threshold selection
+src/train.py          three models, saved to models/
+src/evaluate.py       validation-tuned threshold, test metrics, bootstrap CI
+src/explain.py        SHAP summary, importance table, explainer for the app
+app/streamlit_app.py  scoring app with per-transaction explanation
+tests/                unit tests and an end-to-end smoke test on synthetic data
+.github/workflows/    CI: pytest on every push
+```
 
-### Evaluation and threshold optimization
+## Limitations
 
-python src/evaluate.py
-
-### SHAP explanations
-
-python src/explain.py
-
-### Launch Streamlit App
-
-streamlit run app/streamlit_app.py
-
-
-
-
-
-
-
-
-
+- The costs are illustrative assumptions.
+- One random split; no time-based validation, although fraud patterns drift over time.
+- Test-set differences between models are not significance-tested, and the test split holds only about 100 fraud cases.
+- Features are anonymised, so explanations are statistical rather than business-readable.
+- The Streamlit app runs locally and is not hosted.

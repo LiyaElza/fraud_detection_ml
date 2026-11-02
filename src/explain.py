@@ -1,68 +1,85 @@
-import shap
-import matplotlib.pyplot as plt
+"""SHAP explanations for the XGBoost model.
+
+Run:  python src/explain.py --data data/creditcard.csv
+Saves models/shap_summary.png, models/shap_importance.csv and
+models/shap_explainer.pkl (used by the Streamlit app).
+"""
+import argparse
+import sys
+from pathlib import Path
+
 import joblib
+import numpy as np
+import pandas as pd
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from src.preprocessing import SEED, load_data, prepare  # noqa: E402
+
 
 def get_shap_values(model, X_sample):
-    print(f"Computing SHAP values for {len(X_sample):,} samples...")
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(X_sample)
-    print("Done.")
-    return explainer, shap_values
+    import shap
 
-def plot_summary(shap_values, X_sample):
+    explainer = shap.TreeExplainer(model)
+    return explainer, explainer.shap_values(X_sample)
+
+
+def mean_abs_importance(shap_values, feature_names):
+    return (
+        pd.DataFrame({"feature": feature_names, "mean_abs_shap": np.abs(shap_values).mean(axis=0)})
+        .sort_values("mean_abs_shap", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def plot_summary(shap_values, X_sample, path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import shap
+
     plt.figure()
     shap.summary_plot(shap_values, X_sample, show=False)
-    plt.title("Top Features Driving Fraud Predictions")
+    plt.title("Top features driving fraud predictions")
     plt.tight_layout()
-    plt.savefig("models/shap_summary.png", bbox_inches="tight")
-    plt.show()
-    print("Saved to models/shap_summary.png")
+    plt.savefig(path, bbox_inches="tight")
+    plt.close()
+
 
 def explain_single(explainer, transaction, feature_names):
-    import pandas as pd
-    import numpy as np
-
+    """Per-feature SHAP values for one transaction (a pandas Series)."""
     row = transaction.values.reshape(1, -1)
     sv = explainer.shap_values(row)[0]
+    return (
+        pd.DataFrame(
+            {"feature": feature_names, "shap_value": sv, "abs_impact": np.abs(sv)}
+        )
+        .sort_values("abs_impact", ascending=False)
+        .reset_index(drop=True)
+    )
 
-    result = pd.DataFrame({
-        "feature": feature_names,
-        "shap_value": sv,
-        "abs_impact": np.abs(sv)
-    }).sort_values("abs_impact", ascending=False)
 
-    print(result.head(10).to_string(index=False))
-    return result
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", default="data/creditcard.csv")
+    parser.add_argument("--models-dir", default="models")
+    parser.add_argument("--n-samples", type=int, default=2000)
+    args = parser.parse_args()
+
+    models_dir = Path(args.models_dir)
+    splits = prepare(load_data(args.data))
+    model = joblib.load(models_dir / "xgboost.pkl")
+
+    X_sample = splits["X_val"].sample(
+        min(args.n_samples, len(splits["X_val"])), random_state=SEED
+    )
+    explainer, shap_values = get_shap_values(model, X_sample)
+    plot_summary(shap_values, X_sample, models_dir / "shap_summary.png")
+    importance = mean_abs_importance(shap_values, list(X_sample.columns))
+    importance.to_csv(models_dir / "shap_importance.csv", index=False)
+    joblib.dump(explainer, models_dir / "shap_explainer.pkl")
+    print(importance.head(10).to_string(index=False))
+
 
 if __name__ == "__main__":
-    import sys
-    sys.path.append(".")
-    from src.preprocessing import load_data, drop_time, scale_amount, split_data
-
-    df = load_data("data/creditcard.csv")
-    df = drop_time(df)
-    df, scaler = scale_amount(df)
-    X_train, X_test, y_train, y_test = split_data(df)
-
-    xgb = joblib.load("models/xgboost.pkl")
-
-    # Use a sample of 2000 rows — computing on full dataset is slow
-    X_sample = X_train.sample(2000, random_state=42)
-
-    explainer, shap_values = get_shap_values(xgb, X_sample)
-    plot_summary(shap_values, X_sample)
-
-    joblib.dump(explainer, "models/shap_explainer.pkl")
-    print("Saved to models/shap_explainer.pkl")
-
-    # explain one fraud transaction
-    fraud_idx = y_test[y_test == 1].index[0]
-    transaction = X_test.loc[fraud_idx]
-    print("\nExplaining one fraud transaction:")
-    explain_single(explainer, transaction, list(X_test.columns))
-
-
-    # Print a real fraud transaction's feature values
-    fraud_idx = y_test[y_test == 1].index[0]
-    print("Feature values for a real fraud transaction:")
-    print(X_test.loc[fraud_idx].to_dict())
+    main()
